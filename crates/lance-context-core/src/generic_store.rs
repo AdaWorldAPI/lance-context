@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{ArrowError, Schema};
-use datafusion::prelude::{col, lit, Expr};
+use datafusion::prelude::{col, lit};
 use futures::{FutureExt, TryStreamExt};
 use lance::dataset::mem_wal::{scanner::ShardSnapshot, ShardManifestStore};
 use lance::dataset::optimize::CompactionMetrics;
@@ -33,6 +33,7 @@ use lance::{Error as LanceError, Result as LanceResult};
 use lance_index::mem_wal::ShardManifest;
 
 use crate::generic_codec::{batch_to_rows, rows_to_batch, Row};
+use crate::id_lookup::{is_wal_pk_batch_error, IdLookup, IdLookupView, ScannerIdLookup};
 use crate::merge_budget::MergeMemoryBudget;
 use crate::store::{CompactionConfig, CompactionStats};
 use crate::store_base::{
@@ -114,6 +115,8 @@ pub struct GenericStore {
     /// Whether `add` seals before returning. Resolved from the dataset on a
     /// reopen, from the caller on a create.
     seal_on_add: bool,
+    /// How `get_many` resolves ids. Defaults to [`ScannerIdLookup`].
+    id_lookup: Arc<dyn IdLookup>,
     #[cfg(test)]
     filtered_read_pause: std::sync::Mutex<Option<Arc<FilteredReadPause>>>,
 }
@@ -241,9 +244,27 @@ impl GenericStore {
             spec: persisted,
             schema,
             seal_on_add,
+            id_lookup: Arc::new(ScannerIdLookup),
             #[cfg(test)]
             filtered_read_pause: Default::default(),
         })
+    }
+
+    /// Resolve ids in [`Self::get_many`] through `lookup` instead of the
+    /// default [`ScannerIdLookup`].
+    ///
+    /// An arm that does not cover a view fails the read; use
+    /// [`crate::id_lookup::RoutedIdLookup`] to give it a fallback.
+    #[must_use]
+    pub fn with_id_lookup(mut self, lookup: Arc<dyn IdLookup>) -> Self {
+        self.id_lookup = lookup;
+        self
+    }
+
+    /// The arm [`Self::get_many`] uses.
+    #[must_use]
+    pub fn id_lookup(&self) -> &Arc<dyn IdLookup> {
+        &self.id_lookup
     }
 
     /// The schema this store was created with.
@@ -370,7 +391,6 @@ impl GenericStore {
             .map(String::as_str)
             .filter(|id| seen.insert(*id))
             .collect();
-        let filter = col(ID_COLUMN).in_list(ids.iter().map(|id| lit(*id)).collect(), false);
         let mut columns = columns.map_or_else(|| self.spec.scan_columns(), <[String]>::to_vec);
         if !columns.iter().any(|column| column == ID_COLUMN) {
             columns.push(ID_COLUMN.to_string());
@@ -378,58 +398,29 @@ impl GenericStore {
         let rows = self
             .base
             .read_consistent(ListSource::All, |dataset, snapshots| {
-                let filter = &filter;
                 let columns = &columns;
                 let ids = &ids;
                 async move {
-                    let scanner = StorageBase::lsm_scanner_for_dataset(
-                        &dataset,
-                        ID_COLUMN,
-                        ListSource::All,
-                        snapshots.clone(),
-                    );
-                    let scanner = batch_get_scanner(scanner, filter, columns)?;
-                    let read = async {
-                        let mut stream = scanner.try_into_stream().await?;
-                        let mut rows = Vec::new();
-                        while let Some(batch) = stream.try_next().await? {
-                            rows.extend(batch_to_rows(&self.spec, &batch)?);
-                        }
-                        Ok::<_, LanceError>(rows)
+                    let view = IdLookupView {
+                        dataset: &dataset,
+                        snapshots: &snapshots,
+                    };
+                    let batches = self
+                        .id_lookup
+                        .lookup(view, ids, columns)
+                        .await?
+                        .ok_or_else(|| {
+                            LanceError::invalid_input(format!(
+                                "id lookup `{}` does not cover this view; wrap it in a \
+                                 RoutedIdLookup with a fallback",
+                                self.id_lookup.name()
+                            ))
+                        })?;
+                    let mut rows = Vec::new();
+                    for batch in &batches {
+                        rows.extend(batch_to_rows(&self.spec, batch)?);
                     }
-                    .await;
-                    match read {
-                        Err(error) if is_wal_pk_batch_error(&error) => {
-                            // Lance 9's batched WAL membership probe can reject
-                            // a PK sidecar that its point lookup can still read.
-                            // Discard partial results and retry all keys through
-                            // that native route against the SAME captured view.
-                            // Other errors propagate; no missing row is inferred
-                            // from a failed read. The outer consistency check
-                            // also covers this slower compatibility path.
-                            tracing::warn!(
-                                "batch get retrying native point lookups after a WAL PK index error"
-                            );
-                            let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-                            let mut rows = Vec::new();
-                            for id in ids {
-                                let scanner = StorageBase::lsm_scanner_for_dataset(
-                                    &dataset,
-                                    ID_COLUMN,
-                                    ListSource::All,
-                                    snapshots.clone(),
-                                )
-                                .project(&refs)?
-                                .filter_expr(col(ID_COLUMN).eq(lit(*id)));
-                                let mut stream = scanner.try_into_stream().await?;
-                                while let Some(batch) = stream.try_next().await? {
-                                    rows.extend(batch_to_rows(&self.spec, &batch)?);
-                                }
-                            }
-                            Ok(rows)
-                        }
-                        result => result,
-                    }
+                    Ok::<_, LanceError>(rows)
                 }
             })
             .await?;
@@ -871,24 +862,6 @@ impl GenericStore {
     }
 }
 
-fn batch_get_scanner(
-    scanner: lance::dataset::mem_wal::scanner::LsmScanner,
-    filter: &Expr,
-    columns: &[String],
-) -> LanceResult<lance::dataset::mem_wal::scanner::LsmScanner> {
-    let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-    // Lance 9 routes a bare PK IN to lookup_many_via_per_key, which serializes
-    // disk reads. Explicit OFFSET 0 selects its general LSM scan: one indexed
-    // IN scan per source with Lance's native cross-generation suppression.
-    // This is a compatibility adapter using public APIs; the plan regression
-    // test guards it when Lance changes its routing. No LIMIT: source-local
-    // caps can underfill after newer generations suppress older matches.
-    scanner
-        .project(&refs)?
-        .filter_expr(filter.clone())
-        .limit(None, Some(0))
-}
-
 /// Attach the serialized spec and the seal mode to the Arrow schema, so both
 /// round-trip on open.
 fn schema_with_spec(spec: &SchemaSpec, seal_on_add: bool) -> Result<Schema, ArrowError> {
@@ -995,12 +968,6 @@ async fn collect_scan_keys(
         }
     }
     Ok(())
-}
-
-fn is_wal_pk_batch_error(error: &LanceError) -> bool {
-    error
-        .to_string()
-        .contains("RowAddrTreeMap::from_sorted_iter called with non-sorted input")
 }
 
 #[cfg(test)]
@@ -1156,6 +1123,7 @@ mod tests {
         reopened.close().await.unwrap();
     }
     use super::*;
+    use crate::id_lookup::batch_get_scanner;
     use lance_context_api::schema_spec::{ColumnSpec, ColumnType};
     use serde_json::json;
     use tempfile::TempDir;

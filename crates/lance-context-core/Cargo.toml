@@ -18,6 +18,9 @@ default = ["metrics"]
 metrics = ["dep:metrics"]
 # Opt-in storage diagnostics; share the application's existing metrics recorder.
 lance-io-metrics = ["metrics", "lance/metrics"]
+# Id lookups through lance-graph's Quack over a per-version u64 key lane
+# (`QuackIdLookup`). Off by default; the scanner arm needs nothing extra.
+quack = ["dep:lance-graph-quack", "dep:lance-graph-mask-risc"]
 
 [dependencies]
 async-trait = "0.1.92"
@@ -58,6 +61,8 @@ clap = { version = "4", features = ["derive", "env"] }
 etcd-client = { version = "0.19", features = ["tls"] }
 tracing = "0.1"
 uuid = { version = "1.20.0", features = ["v4", "v5", "v7"] }
+lance-graph-quack = { git = "https://github.com/AdaWorldAPI/lance-graph", branch = "main", optional = true }
+lance-graph-mask-risc = { git = "https://github.com/AdaWorldAPI/lance-graph", branch = "main", optional = true }
 
 [dev-dependencies]
 # Snapshotting recorder so tests can assert which metric series an operation

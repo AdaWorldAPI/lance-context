@@ -15,6 +15,7 @@ pub mod flush_health;
 pub mod generic_codec;
 mod generic_store;
 mod id;
+pub mod id_lookup;
 mod key_index;
 pub mod legacy_retirement;
 pub mod merge_budget;
@@ -83,6 +84,12 @@ pub use export::{
 pub use generic_codec::{batch_to_rows, ids_from_batch, rows_to_batch, Row};
 pub use generic_store::{GenericStore, GenericStoreOptions};
 pub use id::{generate_id, new_uuid};
+#[cfg(feature = "quack")]
+pub use id_lookup::QuackIdLookup;
+pub use id_lookup::{
+    ComparingIdLookup, ComparisonReport, IdLookup, IdLookupView, RoutedIdLookup, RoutingReport,
+    ScannerIdLookup,
+};
 pub use key_index::KeyIndexType;
 pub use merge_budget::{MergeMemoryBudget, MergeReservation, MergeReservationHold};
 pub use namespace::{ContextNamespace, PartitionInfo, PartitionSelector, PartitionSpec};

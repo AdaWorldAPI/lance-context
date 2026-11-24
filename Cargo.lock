@@ -4163,6 +4163,8 @@ dependencies = [
  "lance-context-api",
  "lance-core",
  "lance-file",
+ "lance-graph-mask-risc",
+ "lance-graph-quack",
  "lance-index",
  "lance-io",
  "lance-namespace",
@@ -4548,6 +4550,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "lance-graph-contract"
+version = "0.1.0"
+source = "git+https://github.com/AdaWorldAPI/lance-graph?branch=main#11773a0cca5ad4206a4123c39d865a9e059b7273"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
+name = "lance-graph-mask-risc"
+version = "0.1.0"
+source = "git+https://github.com/AdaWorldAPI/lance-graph?branch=main#11773a0cca5ad4206a4123c39d865a9e059b7273"
+dependencies = [
+ "ndarray 0.17.2",
+]
+
+[[package]]
+name = "lance-graph-quack"
+version = "0.1.0"
+source = "git+https://github.com/AdaWorldAPI/lance-graph?branch=main#11773a0cca5ad4206a4123c39d865a9e059b7273"
+dependencies = [
+ "lance-graph-contract",
+ "lance-graph-mask-risc",
+]
+
+[[package]]
 name = "lance-index"
 version = "14.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4600,7 +4629,7 @@ dependencies = [
  "libsais-rs",
  "log",
  "nalgebra",
- "ndarray",
+ "ndarray 0.16.1",
  "num-traits",
  "object_store 0.14.2",
  "prost",
@@ -5303,6 +5332,21 @@ dependencies = [
  "num-complex",
  "num-integer",
  "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "git+https://github.com/AdaWorldAPI/ndarray?branch=master#c790bd9b8ac3cd722138b6319e812858913ffda3"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "paste",
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
@@ -7721,6 +7765,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8734,6 +8791,12 @@ name = "unindent"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
