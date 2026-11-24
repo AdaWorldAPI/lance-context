@@ -2748,17 +2748,24 @@ mod tests {
         let reader = RolloutStore::open(uri).await.unwrap();
         std::fs::write(dir.path().join("_wal_readers_v1"), b"unavailable").unwrap();
         assert!(reader.get_blob("protected").await.is_err());
-        assert!(reader.query_sql("SELECT id FROM records").await.is_err());
-        assert!(matches!(
-            reader.query_sql("DELETE FROM records").await,
-            Err(LanceError::InvalidInput { .. })
-        ));
+        #[cfg(feature = "datafusion-sql")]
+        {
+            assert!(reader.query_sql("SELECT id FROM records").await.is_err());
+            assert!(matches!(
+                reader.query_sql("DELETE FROM records").await,
+                Err(LanceError::InvalidInput { .. })
+            ));
+        }
         assert_eq!(reader.pending_wal_generations().await.unwrap(), 1);
     }
 
     #[tokio::test]
     async fn wal_lifetime_covers_sql_and_blob_reads() {
-        for blob in [false, true] {
+        // The SQL case needs the console; the blob case always runs.
+        for blob in [false, true]
+            .into_iter()
+            .filter(|blob| *blob || cfg!(feature = "datafusion-sql"))
+        {
             let dir = TempDir::new().unwrap();
             let uri = dir.path().to_str().unwrap();
             let mut writer = RolloutStore::open(uri).await.unwrap();
@@ -2773,8 +2780,15 @@ mod tests {
                     Ok(reader.get_blob("protected").await?.as_deref()
                         == Some(b"protected-payload".as_slice()))
                 } else {
-                    let result = reader.query_sql("SELECT id FROM records").await?;
-                    Ok(result.rows == vec![vec![serde_json::json!("protected")]])
+                    #[cfg(feature = "datafusion-sql")]
+                    {
+                        let result = reader.query_sql("SELECT id FROM records").await?;
+                        Ok(result.rows == vec![vec![serde_json::json!("protected")]])
+                    }
+                    #[cfg(not(feature = "datafusion-sql"))]
+                    {
+                        unreachable!("the SQL case is filtered out without datafusion-sql")
+                    }
                 }
             };
             assert!(
@@ -2790,7 +2804,11 @@ mod tests {
 
     #[tokio::test]
     async fn wal_snapshot_after_drain_sql_and_blob_reads() {
-        for blob in [false, true] {
+        // The SQL case needs the console; the blob case always runs.
+        for blob in [false, true]
+            .into_iter()
+            .filter(|blob| *blob || cfg!(feature = "datafusion-sql"))
+        {
             let dir = TempDir::new().unwrap();
             let uri = dir.path().to_str().unwrap();
             let mut writer = RolloutStore::open(uri).await.unwrap();
@@ -2805,8 +2823,15 @@ mod tests {
                     Ok(reader.get_blob("protected").await?.as_deref()
                         == Some(b"protected-payload".as_slice()))
                 } else {
-                    let result = reader.query_sql("SELECT id FROM records").await?;
-                    Ok(result.rows == vec![vec![serde_json::json!("protected")]])
+                    #[cfg(feature = "datafusion-sql")]
+                    {
+                        let result = reader.query_sql("SELECT id FROM records").await?;
+                        Ok(result.rows == vec![vec![serde_json::json!("protected")]])
+                    }
+                    #[cfg(not(feature = "datafusion-sql"))]
+                    {
+                        unreachable!("the SQL case is filtered out without datafusion-sql")
+                    }
                 }
             };
             assert!(
