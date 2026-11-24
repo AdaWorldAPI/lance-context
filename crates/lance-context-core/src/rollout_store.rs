@@ -57,6 +57,7 @@ use arrow_array::{
     TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, TimeUnit};
+#[cfg(feature = "datafusion-sql")]
 use datafusion::datasource::MemTable;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
@@ -64,7 +65,9 @@ use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
+#[cfg(feature = "datafusion-sql")]
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
+#[cfg(feature = "datafusion-sql")]
 use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
 use futures::{stream, FutureExt, StreamExt, TryStreamExt};
 use lance::dataset::mem_wal::{ShardManifestStore, ShardSnapshot};
@@ -264,17 +267,21 @@ pub struct RolloutPage {
 }
 
 /// Table name the ad-hoc SQL console binds an experiment's records to.
+#[cfg(feature = "datafusion-sql")]
 pub const SQL_TABLE_NAME: &str = "records";
 
 /// Upper bound on rows materialized into the in-memory `records` table for an
 /// ad-hoc SQL query. Guards master memory against a huge experiment.
+#[cfg(feature = "datafusion-sql")]
 pub const SQL_MAX_SCAN_ROWS: usize = 200_000;
 
 /// Upper bound on rows returned by an ad-hoc SQL query. Hitting it flags the
 /// result `truncated` rather than silently dropping rows.
+#[cfg(feature = "datafusion-sql")]
 pub const SQL_MAX_RESULT_ROWS: usize = 10_000;
 
 /// Result of [`RolloutStore::query_sql`]: column names plus JSON-encoded rows.
+#[cfg(feature = "datafusion-sql")]
 #[derive(Debug, Clone)]
 pub struct SqlQueryResult {
     /// Output column names, in select order.
@@ -292,6 +299,7 @@ pub struct SqlQueryResult {
 /// DDL (`CREATE`/`DROP`/…), `COPY`, and `EXPLAIN ANALYZE` side effects. Because
 /// the console only registers one fixed in-memory table, there is no catalog
 /// surface to mutate even if a statement slipped through.
+#[cfg(feature = "datafusion-sql")]
 fn ensure_select_only(sql: &str) -> LanceResult<()> {
     let statements = DFParser::parse_sql(sql)
         .map_err(|err| LanceError::invalid_input(format!("could not parse SQL: {err}")))?;
@@ -312,6 +320,7 @@ fn ensure_select_only(sql: &str) -> LanceResult<()> {
 /// [`SQL_MAX_RESULT_ROWS`] and flagging `truncated` when the cap is reached.
 /// `columns` is taken from the query plan schema so it is populated even for a
 /// zero-row result.
+#[cfg(feature = "datafusion-sql")]
 fn sql_batches_to_result(
     columns: Vec<String>,
     batches: Vec<RecordBatch>,
@@ -1584,6 +1593,7 @@ impl RolloutStore {
     ///
     /// A syntactically invalid or non-`SELECT` query returns
     /// [`LanceError::InvalidInput`] so callers can surface it as a 400.
+    #[cfg(feature = "datafusion-sql")]
     pub async fn query_sql(&self, sql: &str) -> LanceResult<SqlQueryResult> {
         ensure_select_only(sql)?;
 
@@ -9702,6 +9712,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "datafusion-sql")]
     #[test]
     fn ensure_select_only_accepts_select_and_cte() {
         assert!(ensure_select_only("SELECT * FROM records").is_ok());
@@ -9709,6 +9720,7 @@ mod tests {
         assert!(ensure_select_only("WITH t AS (SELECT id FROM records) SELECT * FROM t").is_ok());
     }
 
+    #[cfg(feature = "datafusion-sql")]
     #[test]
     fn ensure_select_only_rejects_mutations_and_multi_statements() {
         for sql in [
@@ -9727,6 +9739,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "datafusion-sql")]
     #[test]
     fn query_sql_runs_select_over_merged_records() {
         let dir = TempDir::new().unwrap();
@@ -9778,6 +9791,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "datafusion-sql")]
     #[test]
     fn query_sql_on_empty_experiment_returns_zero_rows() {
         let dir = TempDir::new().unwrap();

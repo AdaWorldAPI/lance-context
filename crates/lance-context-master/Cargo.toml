@@ -14,7 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 lance-context-merge = { version = "0.1.0", path = "../lance-context-merge" }
-lance-context-core = { version = "0.6.3", path = "../lance-context-core" }
+# The `/experiments/{name}/query` route serves `RolloutStore::query_sql`.
+lance-context-core = { version = "0.6.3", path = "../lance-context-core", features = ["datafusion-sql"] }
 lance-context-api = { version = "0.6.3", path = "../lance-context-api" }
 lance-context-metrics = { version = "0.1.0", path = "../lance-context-metrics" }
 arrow-array = "58"
