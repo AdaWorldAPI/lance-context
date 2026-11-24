@@ -352,8 +352,8 @@ mod quack_plain {
         );
     }
 
-    /// The arm itself, not `lookup_plain`, returns the requested order:
-    /// `take_rows` alone would return schema order (`id`, `score`).
+    /// The arm itself, not `lookup_plain`, returns the requested order,
+    /// which differs from schema order (`id`, `score`).
     #[tokio::test]
     async fn the_quack_arm_returns_columns_in_requested_order() {
         let dir = tempfile::tempdir().unwrap();

@@ -262,8 +262,9 @@ impl IdLookup for QuackIdLookup {
         let batch = view.dataset.take_rows(&row_ids, projection).await?;
         let wanted: HashSet<&str> = ids.iter().copied().collect();
         let kept = keep_wanted(&batch, &wanted)?;
-        // `take_rows` returns columns in schema order; callers read by
-        // position, so restore the requested order.
+        // Callers read by position. Lance's projection already keeps the
+        // requested order (measured: removing this line fails no test); this
+        // states the contract instead of relying on that.
         Ok(Some(vec![super::project_in_order(&kept, &refs)?]))
     }
 
