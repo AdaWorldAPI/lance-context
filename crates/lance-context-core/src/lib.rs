@@ -99,9 +99,10 @@ pub use registry_etcd::EtcdRegistry;
 pub use rollout::{RolloutRecord, ROLE_ARTIFACT, ROLE_ASSISTANT, ROLE_GRADE, ROLE_TOOL};
 pub use rollout_store::{
     rollout_schema, ListSource, PreparedMerge, RolloutFilters, RolloutObservation, RolloutPage,
-    RolloutStore, RolloutStoreOptions, SqlQueryResult, SQL_MAX_RESULT_ROWS, SQL_MAX_SCAN_ROWS,
-    SQL_TABLE_NAME,
+    RolloutStore, RolloutStoreOptions,
 };
+#[cfg(feature = "datafusion-sql")]
+pub use rollout_store::{SqlQueryResult, SQL_MAX_RESULT_ROWS, SQL_MAX_SCAN_ROWS, SQL_TABLE_NAME};
 // Schema declaration lives in the API crate: it is part of the wire contract.
 pub use lance_context_api::{
     trace_schema, ColumnSpec, ColumnType, SchemaSpec, TraceRecord, TraceStore, ID_COLUMN,

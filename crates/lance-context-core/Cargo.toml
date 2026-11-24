@@ -11,7 +11,12 @@ keywords = ["context", "multimodal", "lance", "agents", "storage"]
 categories = ["database", "data-structures", "science"]
 
 [features]
-default = ["metrics"]
+default = ["metrics", "datafusion-sql"]
+# The ad-hoc SQL console (`RolloutStore::query_sql`): DataFusion used as a query
+# engine (SQL parser, `SessionContext`, `MemTable`). Off removes only that
+# surface; Lance itself still depends on DataFusion, and the scanner filters,
+# record-batch streams and the paged LSM sort keep using it.
+datafusion-sql = []
 # Emit Prometheus metrics for store operations (add/flush/WAL merge latency).
 # Optional so downstream consumers embedding this library are not forced to take
 # the `metrics` dependency; call sites compile to nothing when disabled.
