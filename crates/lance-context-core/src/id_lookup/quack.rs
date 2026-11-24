@@ -19,8 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use arrow_array::{Array, BooleanArray, LargeStringArray, RecordBatch, StringArray, UInt64Array};
-use arrow_select::filter::filter_record_batch;
+use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray, UInt64Array};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use lance::{Dataset, Error as LanceError, Result as LanceResult};
@@ -179,23 +178,7 @@ fn push_keys(ids: &dyn Array, keys: &mut Vec<u64>) -> LanceResult<()> {
 
 /// Keep the rows of `batch` whose id is in `wanted`.
 fn keep_wanted(batch: &RecordBatch, wanted: &HashSet<&str>) -> LanceResult<RecordBatch> {
-    let column = batch.column_by_name(ID_COLUMN).ok_or_else(|| {
-        LanceError::invalid_input(format!("take result has no `{ID_COLUMN}` column"))
-    })?;
-    let keep: BooleanArray = if let Some(a) = column.as_any().downcast_ref::<StringArray>() {
-        (0..a.len())
-            .map(|i| Some(a.is_valid(i) && wanted.contains(a.value(i))))
-            .collect()
-    } else if let Some(a) = column.as_any().downcast_ref::<LargeStringArray>() {
-        (0..a.len())
-            .map(|i| Some(a.is_valid(i) && wanted.contains(a.value(i))))
-            .collect()
-    } else {
-        return Err(LanceError::invalid_input(format!(
-            "`{ID_COLUMN}` is not a string column"
-        )));
-    };
-    Ok(filter_record_batch(batch, &keep)?)
+    super::keep_ids(batch, wanted)
 }
 
 /// Id lookup through a Quack program over a per-version key lane.
@@ -266,6 +249,14 @@ impl IdLookup for QuackIdLookup {
         // requested order (measured: removing this line fails no test); this
         // states the contract instead of relying on that.
         Ok(Some(vec![super::project_in_order(&kept, &refs)?]))
+    }
+
+    async fn row_ids(&self, view: IdLookupView<'_>, ids: &[&str]) -> LanceResult<Option<Vec<u64>>> {
+        if view.lsm && !view.is_base_only() {
+            return Ok(None);
+        }
+        let lane = self.lane_for(view.dataset).await?;
+        Ok(Some(lane.candidates(ids)?))
     }
 
     fn name(&self) -> &'static str {

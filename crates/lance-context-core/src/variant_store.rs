@@ -3,10 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use arrow_array::{RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use datafusion::{
-    physical_plan::{stream::RecordBatchStreamAdapter, SendableRecordBatchStream},
-    prelude::{col, lit},
-};
+use datafusion::physical_plan::{stream::RecordBatchStreamAdapter, SendableRecordBatchStream};
 use futures::{StreamExt, TryStreamExt};
 use lance::dataset::{
     builder::DatasetBuilder, CommitBuilder, InsertBuilder, WriteMode, WriteParams,
@@ -250,13 +247,20 @@ impl VariantDocumentStore {
     /// Read a path using Arrow's Variant path kernel, including standard residual
     /// fallback. Projection includes the requested subtree and ancestor residuals.
     pub async fn get_path(&self, id: &str, path: &[String]) -> Result<Option<Value>> {
-        let mut scanner = self.dataset.scan();
-        scanner
-            .project_with_schema(&self.project_schema(&self.projection(path))?)?
-            .filter_expr(col(ID).eq(lit(id)));
-        scanner.limit(Some(1), None)?;
-        let mut stream = scanner.try_into_stream().await?;
-        while let Some(batch) = stream.try_next().await? {
+        // `id` joins the Variant projection so the lookup can confirm a row
+        // belongs to `id`.
+        let mut paths = self.projection(path);
+        paths.push(vec![ID.to_owned()]);
+        let projection = self.project_schema(&paths)?;
+        let lookup = crate::id_lookup::default_id_lookup();
+        let found = crate::id_lookup::lookup_plain_with_schema(
+            lookup.as_ref(),
+            &self.dataset,
+            &[id],
+            &projection,
+        )
+        .await?;
+        for batch in found {
             if batch.num_rows() == 0 {
                 continue;
             }

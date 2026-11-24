@@ -99,6 +99,18 @@ pub trait IdLookup: Send + Sync + fmt::Debug {
         columns: &[String],
     ) -> LanceResult<Option<Vec<RecordBatch>>>;
 
+    /// The Lance row ids that may hold `ids` in `view`, or `None` if this arm
+    /// cannot select rows without reading them. A returned row id may belong
+    /// to an id that was not asked for (a key collision); callers fetch the
+    /// `id` column with the rows and check it.
+    async fn row_ids(
+        &self,
+        _view: IdLookupView<'_>,
+        _ids: &[&str],
+    ) -> LanceResult<Option<Vec<u64>>> {
+        Ok(None)
+    }
+
     /// A short name for logs and reports.
     fn name(&self) -> &'static str;
 }
@@ -259,6 +271,77 @@ pub async fn lookup_plain(
         .collect()
 }
 
+/// Look `ids` up in a plain dataset with a Lance projection schema, for
+/// reads that select nested fields (Variant sub-columns). `projection` must
+/// include the top-level `id` field.
+///
+/// Arms that select row ids ([`IdLookup::row_ids`]) are answered with
+/// `take_rows`; a fetched row is kept only if its id was asked for. Other
+/// arms fall back to a scan with `project_with_schema` and `id IN (...)`.
+/// Every matching row is returned.
+///
+/// # Errors
+///
+/// If `projection` has no `id` field, or a read fails.
+pub async fn lookup_plain_with_schema(
+    lookup: &dyn IdLookup,
+    dataset: &Dataset,
+    ids: &[&str],
+    projection: &lance_core::datatypes::Schema,
+) -> LanceResult<Vec<RecordBatch>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if projection.field(ID_COLUMN).is_none() {
+        return Err(LanceError::invalid_input(format!(
+            "projection for an id lookup must include `{ID_COLUMN}`"
+        )));
+    }
+    let view = IdLookupView::plain(dataset);
+    if let Some(row_ids) = lookup.row_ids(view, ids).await? {
+        if row_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = dataset.take_rows(&row_ids, projection.clone()).await?;
+        let wanted: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        return Ok(vec![keep_ids(&batch, &wanted)?]);
+    }
+    let filter = col(ID_COLUMN).in_list(ids.iter().map(|id| lit(*id)).collect(), false);
+    let mut scan = dataset.scan();
+    scan.project_with_schema(projection)?.filter_expr(filter);
+    let mut stream = scan.try_into_stream().await?;
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.try_next().await? {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+/// The rows of `batch` whose `id` is in `wanted`.
+pub(crate) fn keep_ids(
+    batch: &RecordBatch,
+    wanted: &std::collections::HashSet<&str>,
+) -> LanceResult<RecordBatch> {
+    let column = batch.column_by_name(ID_COLUMN).ok_or_else(|| {
+        LanceError::invalid_input(format!("take result has no `{ID_COLUMN}` column"))
+    })?;
+    let keep: arrow_array::BooleanArray =
+        if let Some(a) = column.as_any().downcast_ref::<StringArray>() {
+            (0..a.len())
+                .map(|i| Some(a.is_valid(i) && wanted.contains(a.value(i))))
+                .collect()
+        } else if let Some(a) = column.as_any().downcast_ref::<LargeStringArray>() {
+            (0..a.len())
+                .map(|i| Some(a.is_valid(i) && wanted.contains(a.value(i))))
+                .collect()
+        } else {
+            return Err(LanceError::invalid_input(format!(
+                "`{ID_COLUMN}` is not a string column"
+            )));
+        };
+    Ok(arrow_select::filter::filter_record_batch(batch, &keep)?)
+}
+
 /// `batch` with exactly `columns`, in that order.
 pub(crate) fn project_in_order(batch: &RecordBatch, columns: &[&str]) -> LanceResult<RecordBatch> {
     let schema = batch.schema();
@@ -410,6 +493,10 @@ impl IdLookup for ComparingIdLookup {
         Ok(Some(primary_batches))
     }
 
+    async fn row_ids(&self, view: IdLookupView<'_>, ids: &[&str]) -> LanceResult<Option<Vec<u64>>> {
+        self.primary.row_ids(view, ids).await
+    }
+
     fn name(&self) -> &'static str {
         "comparing"
     }
@@ -478,6 +565,15 @@ impl IdLookup for RoutedIdLookup {
         }
         self.report.fallback.fetch_add(1, Ordering::Relaxed);
         self.fallback.lookup(view, ids, columns).await
+    }
+
+    async fn row_ids(&self, view: IdLookupView<'_>, ids: &[&str]) -> LanceResult<Option<Vec<u64>>> {
+        if let Some(rows) = self.preferred.row_ids(view, ids).await? {
+            self.report.preferred.fetch_add(1, Ordering::Relaxed);
+            return Ok(Some(rows));
+        }
+        self.report.fallback.fetch_add(1, Ordering::Relaxed);
+        self.fallback.row_ids(view, ids).await
     }
 
     fn name(&self) -> &'static str {
