@@ -403,3 +403,67 @@ async fn type_drift_preserves_indexed_siblings_after_reopen() {
         vec![ids[2].clone()]
     );
 }
+
+/// Both arms answer the same nested Variant projection with the same rows.
+#[cfg(feature = "quack")]
+#[tokio::test]
+async fn quack_and_scanner_agree_on_nested_variant_projections() {
+    use crate::id_lookup::{lookup_plain_with_schema, QuackIdLookup, ScannerIdLookup};
+
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("arms.lance");
+    let mut store =
+        VariantDocumentStore::create(uri.to_str().unwrap(), ShredPolicy::default(), None)
+            .await
+            .unwrap();
+    let documents: Vec<Value> = (0..40)
+        .map(|i| json!({"a": {"b": i, "c": format!("s{i}")}, "n": i}))
+        .collect();
+    let ids = store.add(documents).await.unwrap();
+    let quack = QuackIdLookup::new();
+    let mut compared = 0;
+    for path in [vec![], vec!["a".to_string()], vec!["a".into(), "b".into()]] {
+        let mut paths = store.projection(&path);
+        paths.push(vec![ID.to_owned()]);
+        let projection = store.project_schema(&paths).unwrap();
+        for id in ids.iter().step_by(7).map(String::as_str).chain(["missing"]) {
+            let by_scan =
+                lookup_plain_with_schema(&ScannerIdLookup, &store.dataset, &[id], &projection)
+                    .await
+                    .unwrap();
+            let by_quack = lookup_plain_with_schema(&quack, &store.dataset, &[id], &projection)
+                .await
+                .unwrap();
+            let rows = |b: &[RecordBatch]| b.iter().map(RecordBatch::num_rows).sum::<usize>();
+            assert_eq!(rows(&by_scan), rows(&by_quack), "{id} {path:?}");
+            if rows(&by_scan) > 0 {
+                let first =
+                    |b: &[RecordBatch]| b.iter().find(|b| b.num_rows() > 0).unwrap().clone();
+                assert_eq!(first(&by_scan), first(&by_quack), "{id} {path:?}");
+                compared += 1;
+            }
+        }
+    }
+    assert_eq!(compared, 18, "6 present ids x 3 projections");
+}
+
+#[tokio::test]
+async fn a_schema_projection_without_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("noid.lance");
+    let mut store =
+        VariantDocumentStore::create(uri.to_str().unwrap(), ShredPolicy::default(), None)
+            .await
+            .unwrap();
+    let id = store.add(vec![json!({"x": 1})]).await.unwrap()[0].clone();
+    let projection = store.project_schema(&store.projection(&[])).unwrap();
+    let error = crate::id_lookup::lookup_plain_with_schema(
+        crate::id_lookup::default_id_lookup().as_ref(),
+        &store.dataset,
+        &[id.as_str()],
+        &projection,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("must include"), "{error}");
+}

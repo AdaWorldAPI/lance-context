@@ -199,12 +199,16 @@ impl DocumentStore {
         Ok(ids)
     }
 
+    /// The rows holding `id`, with exactly `columns`.
+    async fn lookup_one(&self, id: &str, columns: &[&str]) -> Result<Vec<RecordBatch>> {
+        let lookup = crate::id_lookup::default_id_lookup();
+        crate::id_lookup::lookup_plain(lookup.as_ref(), &self.dataset, &[id], columns).await
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Value>> {
-        let mut scanner = self.dataset.scan();
-        scanner.filter_expr(col(ID).eq(lit(id)));
-        scanner.limit(Some(1), None)?;
-        let mut stream = scanner.try_into_stream().await?;
-        while let Some(batch) = stream.try_next().await? {
+        let schema = self.dataset.schema();
+        let columns: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+        for batch in self.lookup_one(id, &columns).await? {
             if batch.num_rows() > 0 {
                 return Ok(Some(decode(&batch, 0, &self.layout)?));
             }
@@ -223,13 +227,7 @@ impl DocumentStore {
             .position(|field| field.path == path)
         {
             let name = column_name(&self.layout.fields[index]);
-            let mut scanner = self.dataset.scan();
-            scanner
-                .project(&[name.as_str()])?
-                .filter_expr(col(ID).eq(lit(id)));
-            scanner.limit(Some(1), None)?;
-            let mut stream = scanner.try_into_stream().await?;
-            while let Some(batch) = stream.try_next().await? {
+            for batch in self.lookup_one(id, &[name.as_str()]).await? {
                 if batch.num_rows() > 0 {
                     if let Some(value) =
                         scalar_value(batch.column(0), 0, self.layout.fields[index].data_type)?
@@ -242,12 +240,9 @@ impl DocumentStore {
         let layout = self.projected_layout(path);
         let mut columns = vec![RESIDUAL.to_owned()];
         columns.extend(layout.fields.iter().map(column_name));
-        let mut scanner = self.dataset.scan();
-        scanner.project(&columns)?.filter_expr(col(ID).eq(lit(id)));
-        scanner.limit(Some(1), None)?;
-        let mut stream = scanner.try_into_stream().await?;
+        let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
         let mut found = None;
-        while let Some(batch) = stream.try_next().await? {
+        for batch in self.lookup_one(id, &refs).await? {
             if batch.num_rows() > 0 {
                 found = Some(decode(&batch, 0, &layout)?);
                 break;

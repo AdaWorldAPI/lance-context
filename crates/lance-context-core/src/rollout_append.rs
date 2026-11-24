@@ -8,7 +8,6 @@ use std::sync::Arc;
 use arrow_array::{Array, BooleanArray, RecordBatch, StringArray};
 use arrow_schema::Schema;
 use arrow_select::filter::filter_record_batch;
-use datafusion::prelude::{col, lit};
 use futures::TryStreamExt;
 use lance::dataset::{
     mem_wal::{DatasetMemWalExt, ShardManifestStore},
@@ -862,14 +861,12 @@ pub async fn stage(
         }
         let ids: Vec<_> = ids.into_iter().collect();
         lookup_ids = ids.len();
+        let lookup = crate::id_lookup::default_id_lookup();
         for chunk in ids.chunks(1024) {
-            let mut scanner = dataset.scan();
-            scanner.project(&["id"])?;
-            scanner.filter_expr(
-                col("id").in_list(chunk.iter().map(|id| lit(id.clone())).collect(), false),
-            );
-            let mut rows = scanner.try_into_stream().await?;
-            while let Some(batch) = rows.try_next().await? {
+            let chunk: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let found =
+                crate::id_lookup::lookup_plain(lookup.as_ref(), &dataset, &chunk, &["id"]).await?;
+            for batch in found {
                 let column = batch
                     .column(0)
                     .as_any()
