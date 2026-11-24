@@ -352,6 +352,23 @@ mod quack_plain {
         );
     }
 
+    /// The arm itself, not `lookup_plain`, returns the requested order:
+    /// `take_rows` alone would return schema order (`id`, `score`).
+    #[tokio::test]
+    async fn the_quack_arm_returns_columns_in_requested_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t").to_str().unwrap().to_string();
+        let _store = merged_store(&uri, 5).await;
+        let dataset = lance::Dataset::open(&uri).await.unwrap();
+        let columns = ["score".to_string(), ID_COLUMN.to_string()];
+        let got = QuackIdLookup::new()
+            .lookup(IdLookupView::plain(&dataset), &["r2"], &columns)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(names(&got), ["score", "id"]);
+    }
+
     #[test]
     fn the_default_arm_prefers_quack() {
         assert_eq!(default_id_lookup().name(), "routed");
