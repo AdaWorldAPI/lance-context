@@ -374,3 +374,57 @@ mod quack_plain {
         assert_eq!(default_id_lookup().name(), "routed");
     }
 }
+
+/// Returns every row id of the dataset, as a key collision with every row
+/// would.
+#[derive(Debug)]
+struct EveryRowLookup;
+
+#[async_trait]
+impl IdLookup for EveryRowLookup {
+    async fn lookup(
+        &self,
+        _: IdLookupView<'_>,
+        _: &[&str],
+        _: &[String],
+    ) -> LanceResult<Option<Vec<RecordBatch>>> {
+        Ok(None)
+    }
+
+    async fn row_ids(&self, view: IdLookupView<'_>, _: &[&str]) -> LanceResult<Option<Vec<u64>>> {
+        use futures::TryStreamExt;
+        let mut scan = view.dataset.scan();
+        scan.project(&[ID_COLUMN]).unwrap().with_row_id();
+        let batches: Vec<RecordBatch> = scan.try_into_stream().await?.try_collect().await?;
+        let mut rows = Vec::new();
+        for batch in batches {
+            let column = batch
+                .column_by_name("_rowid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::UInt64Array>()
+                .unwrap()
+                .clone();
+            rows.extend(column.values().iter().copied());
+        }
+        Ok(Some(rows))
+    }
+
+    fn name(&self) -> &'static str {
+        "every-row"
+    }
+}
+
+#[tokio::test]
+async fn a_schema_lookup_keeps_only_requested_ids_when_row_ids_overselect() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("t").to_str().unwrap().to_string();
+    let _store = merged_store(&uri, 12).await;
+    let dataset = lance::Dataset::open(&uri).await.unwrap();
+    let projection = dataset.schema().project(&[ID_COLUMN, "score"]).unwrap();
+    let got = lookup_plain_with_schema(&EveryRowLookup, &dataset, &["r3", "r9"], &projection)
+        .await
+        .unwrap();
+    assert_eq!(ids_of(&got).unwrap(), ["r3", "r9"].map(String::from).into());
+    assert_eq!(got.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+}
