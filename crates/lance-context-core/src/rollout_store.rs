@@ -56,7 +56,9 @@ use arrow_array::{
     Int8Array, LargeBinaryArray, LargeStringArray, ListArray, RecordBatch, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, TimeUnit};
+#[cfg(feature = "datafusion-sql")]
+use arrow_schema::FieldRef;
+use arrow_schema::{ArrowError, DataType, Field, Schema, TimeUnit};
 #[cfg(feature = "datafusion-sql")]
 use datafusion::datasource::MemTable;
 use datafusion::physical_expr::expressions::Column;
@@ -2054,6 +2056,7 @@ impl RolloutStore {
 
     /// Top-level column names excluding `binary_payload`, so list-style scans
     /// never materialize artifact bytes.
+    #[cfg(feature = "datafusion-sql")]
     fn non_blob_columns(&self) -> Vec<String> {
         Self::non_blob_columns_for(&self.base.dataset)
     }
