@@ -257,3 +257,103 @@ mod quack_arm {
         assert_eq!(kept, ["b"]);
     }
 }
+
+/// Delegates to the scanner and counts calls.
+#[derive(Debug, Default)]
+struct CountingLookup {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl IdLookup for CountingLookup {
+    async fn lookup(
+        &self,
+        view: IdLookupView<'_>,
+        ids: &[&str],
+        columns: &[String],
+    ) -> LanceResult<Option<Vec<RecordBatch>>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ScannerIdLookup.lookup(view, ids, columns).await
+    }
+
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+}
+
+#[tokio::test]
+async fn get_resolves_through_the_store_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("t").to_str().unwrap().to_string();
+    let counting = Arc::new(CountingLookup::default());
+    let store = merged_store(&uri, 10)
+        .await
+        .with_id_lookup(counting.clone());
+    let found = store.get("r4", None).await.unwrap().unwrap();
+    assert_eq!(found["score"], json!(4.0));
+    assert!(store.get("missing", None).await.unwrap().is_none());
+    assert_eq!(counting.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// Column names of `batches`, which must agree.
+fn names(batches: &[RecordBatch]) -> Vec<String> {
+    batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn lookup_plain_returns_exactly_the_requested_columns_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = dir.path().join("t").to_str().unwrap().to_string();
+    let store = merged_store(&uri, 10).await;
+    let dataset = lance::Dataset::open(&uri).await.unwrap();
+    let _ = store;
+    let arm = ScannerIdLookup;
+
+    // Without `id`: it is read for the lookup and dropped.
+    let only_score = lookup_plain(&arm, &dataset, &["r1", "r2"], &["score"])
+        .await
+        .unwrap();
+    assert_eq!(names(&only_score), ["score"]);
+    assert_eq!(
+        only_score.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        2
+    );
+
+    // Against schema order (`id`, `score`).
+    let reversed = lookup_plain(&arm, &dataset, &["r1"], &["score", "id"])
+        .await
+        .unwrap();
+    assert_eq!(names(&reversed), ["score", "id"]);
+}
+
+#[cfg(feature = "quack")]
+mod quack_plain {
+    use super::*;
+
+    #[tokio::test]
+    async fn quack_keeps_the_requested_column_order_on_a_plain_dataset() {
+        let dir = tempfile::tempdir().unwrap();
+        let uri = dir.path().join("t").to_str().unwrap().to_string();
+        let _store = merged_store(&uri, 30).await;
+        let dataset = lance::Dataset::open(&uri).await.unwrap();
+        let arm = QuackIdLookup::new();
+        let got = lookup_plain(&arm, &dataset, &["r7", "r29", "nope"], &["score", "id"])
+            .await
+            .unwrap();
+        assert_eq!(names(&got), ["score", "id"]);
+        assert_eq!(
+            ids_of(&got).unwrap(),
+            ["r29", "r7"].map(String::from).into()
+        );
+    }
+
+    #[test]
+    fn the_default_arm_prefers_quack() {
+        assert_eq!(default_id_lookup().name(), "routed");
+    }
+}

@@ -707,17 +707,18 @@ impl PointRead {
 }
 
 async fn read_base(base: &Dataset, turn: &str, max_bytes: usize) -> Result<Option<TurnAnnotation>> {
-    let mut scan = base.scan();
-    scan.project(&["labels", "status", "score"])?;
-    scan.filter_expr(col("id").eq(lit(turn)));
-    scan.limit(Some(2), None)?;
-    // The two-row result limit detects duplicates, including an indexed match
-    // repeated in an uncovered tail. Larger scan vectors amortize that tail's
-    // filtering work without returning more matches or projecting the body.
-    scan.batch_size(COLD_POINT_SCAN_ROWS);
-    let mut stream = scan.try_into_stream().await?;
+    // Every row holding `turn` is returned, so a second one proves a
+    // duplicate key.
+    let lookup = crate::id_lookup::default_id_lookup();
+    let found = crate::id_lookup::lookup_plain(
+        lookup.as_ref(),
+        base,
+        &[turn],
+        &["labels", "status", "score"],
+    )
+    .await?;
     let mut value = None;
-    while let Some(batch) = stream.try_next().await? {
+    for batch in found {
         for row in 0..batch.num_rows() {
             if value.is_some() {
                 return Err(invalid("duplicate annotation turn key in Lance"));
@@ -772,17 +773,13 @@ async fn read_existing_with_scan_rows<'a>(
     if turns.is_empty() {
         return Ok(rows);
     }
-    let mut scan = base.scan();
-    scan.project(projection)?;
-    scan.filter_expr(col("id").in_list(turns.iter().map(|turn| lit(*turn)).collect(), false));
-    // A valid table returns at most one row per requested key. One extra row
-    // proves a duplicate without retaining an unbounded corrupt result set.
-    scan.limit(Some(turns.len() as i64 + 1), None)?;
-    // Existence probes decode only IDs. Amortize scanning a growing base over
-    // the existing key window without increasing annotation/body projections.
-    scan.batch_size(scan_rows);
-    let mut stream = scan.try_into_stream().await?;
-    while let Some(batch) = stream.try_next().await? {
+    // A valid table holds at most one row per requested key; every matching
+    // row is returned, so a duplicate is detected below.
+    let _ = scan_rows;
+    let lookup = crate::id_lookup::default_id_lookup();
+    let keys: Vec<&str> = turns.iter().copied().collect();
+    let found = crate::id_lookup::lookup_plain(lookup.as_ref(), base, &keys, projection).await?;
+    for batch in found {
         let ids = batch
             .column_by_name("id")
             .ok_or_else(|| invalid("missing annotation id"))?

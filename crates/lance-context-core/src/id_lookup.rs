@@ -49,9 +49,33 @@ pub struct IdLookupView<'a> {
     pub dataset: &'a Dataset,
     /// The flushed generations captured for `dataset`.
     pub snapshots: &'a [ShardSnapshot],
+    /// Whether `dataset` is the base of an LSM store. A plain dataset (an
+    /// annotation base, a document table, a merge target read directly) is
+    /// read with an ordinary scan instead of the LSM scanner.
+    pub lsm: bool,
 }
 
-impl IdLookupView<'_> {
+impl<'a> IdLookupView<'a> {
+    /// The base of an LSM store together with its captured generations.
+    #[must_use]
+    pub fn lsm(dataset: &'a Dataset, snapshots: &'a [ShardSnapshot]) -> Self {
+        Self {
+            dataset,
+            snapshots,
+            lsm: true,
+        }
+    }
+
+    /// A plain dataset with no write-ahead log.
+    #[must_use]
+    pub fn plain(dataset: &'a Dataset) -> Self {
+        Self {
+            dataset,
+            snapshots: &[],
+            lsm: false,
+        }
+    }
+
     /// Whether no flushed generation is pending, so the base dataset alone
     /// holds every readable row.
     #[must_use]
@@ -92,6 +116,17 @@ impl IdLookup for ScannerIdLookup {
         columns: &[String],
     ) -> LanceResult<Option<Vec<RecordBatch>>> {
         let filter = col(ID_COLUMN).in_list(ids.iter().map(|id| lit(*id)).collect(), false);
+        if !view.lsm {
+            let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
+            let mut scan = view.dataset.scan();
+            scan.project(&refs)?.filter_expr(filter);
+            let mut stream = scan.try_into_stream().await?;
+            let mut batches = Vec::new();
+            while let Some(batch) = stream.try_next().await? {
+                batches.push(batch);
+            }
+            return Ok(Some(batches));
+        }
         let scanner = StorageBase::lsm_scanner_for_dataset(
             view.dataset,
             ID_COLUMN,
@@ -161,6 +196,81 @@ pub(crate) fn batch_get_scanner(
         .project(&refs)?
         .filter_expr(filter.clone())
         .limit(None, Some(0))
+}
+
+/// The arm a store uses unless told otherwise.
+///
+/// Without the `quack` feature this is [`ScannerIdLookup`]. With it, it is
+/// one process-wide [`RoutedIdLookup`] that prefers
+/// [`QuackIdLookup`] and falls back to the scanner for views the Quack arm
+/// does not cover.
+#[must_use]
+pub fn default_id_lookup() -> Arc<dyn IdLookup> {
+    #[cfg(feature = "quack")]
+    {
+        static DEFAULT: std::sync::OnceLock<Arc<dyn IdLookup>> = std::sync::OnceLock::new();
+        DEFAULT
+            .get_or_init(|| {
+                Arc::new(RoutedIdLookup::new(
+                    Arc::new(QuackIdLookup::new()),
+                    Arc::new(ScannerIdLookup),
+                ))
+            })
+            .clone()
+    }
+    #[cfg(not(feature = "quack"))]
+    {
+        Arc::new(ScannerIdLookup)
+    }
+}
+
+/// Look `ids` up in a plain dataset, returning exactly `columns` in that
+/// order. `id` is read for the lookup and dropped if `columns` omits it.
+/// Duplicate rows for one id are all returned, so callers can detect them.
+///
+/// # Errors
+///
+/// If the arm fails, or covers no plain view.
+pub async fn lookup_plain(
+    lookup: &dyn IdLookup,
+    dataset: &Dataset,
+    ids: &[&str],
+    columns: &[&str],
+) -> LanceResult<Vec<RecordBatch>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut read: Vec<String> = columns.iter().map(|c| (*c).to_string()).collect();
+    if !read.iter().any(|c| c == ID_COLUMN) {
+        read.push(ID_COLUMN.to_string());
+    }
+    let batches = lookup
+        .lookup(IdLookupView::plain(dataset), ids, &read)
+        .await?
+        .ok_or_else(|| {
+            LanceError::invalid_input(format!(
+                "id lookup `{}` does not cover a plain dataset",
+                lookup.name()
+            ))
+        })?;
+    batches
+        .iter()
+        .map(|batch| project_in_order(batch, columns))
+        .collect()
+}
+
+/// `batch` with exactly `columns`, in that order.
+pub(crate) fn project_in_order(batch: &RecordBatch, columns: &[&str]) -> LanceResult<RecordBatch> {
+    let schema = batch.schema();
+    let indices = columns
+        .iter()
+        .map(|name| {
+            schema.index_of(name).map_err(|_| {
+                LanceError::invalid_input(format!("lookup result has no `{name}` column"))
+            })
+        })
+        .collect::<LanceResult<Vec<_>>>()?;
+    Ok(batch.project(&indices)?)
 }
 
 pub(crate) fn is_wal_pk_batch_error(error: &LanceError) -> bool {

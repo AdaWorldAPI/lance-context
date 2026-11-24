@@ -15,7 +15,7 @@
 //! write-ahead-log generations is not covered: [`QuackIdLookup::lookup`]
 //! returns `Ok(None)` and a wrapper decides what answers instead.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -205,8 +205,12 @@ fn keep_wanted(batch: &RecordBatch, wanted: &HashSet<&str>) -> LanceResult<Recor
 /// it.
 #[derive(Debug, Default)]
 pub struct QuackIdLookup {
-    lane: Mutex<Option<Arc<IdLane>>>,
+    /// The newest lane built per dataset URI.
+    lanes: Mutex<HashMap<String, Arc<IdLane>>>,
 }
+
+/// Lanes kept at once. A lane for a URI beyond this evicts an arbitrary one.
+const MAX_LANES: usize = 64;
 
 impl QuackIdLookup {
     /// An arm with an empty lane cache.
@@ -217,13 +221,22 @@ impl QuackIdLookup {
 
     async fn lane_for(&self, dataset: &Dataset) -> LanceResult<Arc<IdLane>> {
         {
-            let cached = self.lane.lock().expect("lane cache lock");
-            if let Some(lane) = cached.as_ref().filter(|lane| lane.matches(dataset)) {
+            let cached = self.lanes.lock().expect("lane cache lock");
+            if let Some(lane) = cached
+                .get(dataset.uri())
+                .filter(|lane| lane.matches(dataset))
+            {
                 return Ok(lane.clone());
             }
         }
         let lane = Arc::new(IdLane::build(dataset).await?);
-        *self.lane.lock().expect("lane cache lock") = Some(lane.clone());
+        let mut cached = self.lanes.lock().expect("lane cache lock");
+        if cached.len() >= MAX_LANES && !cached.contains_key(dataset.uri()) {
+            if let Some(evict) = cached.keys().next().cloned() {
+                cached.remove(&evict);
+            }
+        }
+        cached.insert(dataset.uri().to_string(), lane.clone());
         Ok(lane)
     }
 }
@@ -236,7 +249,7 @@ impl IdLookup for QuackIdLookup {
         ids: &[&str],
         columns: &[String],
     ) -> LanceResult<Option<Vec<RecordBatch>>> {
-        if !view.is_base_only() {
+        if view.lsm && !view.is_base_only() {
             return Ok(None);
         }
         let lane = self.lane_for(view.dataset).await?;
@@ -248,7 +261,10 @@ impl IdLookup for QuackIdLookup {
         let projection = view.dataset.schema().project(&refs)?;
         let batch = view.dataset.take_rows(&row_ids, projection).await?;
         let wanted: HashSet<&str> = ids.iter().copied().collect();
-        Ok(Some(vec![keep_wanted(&batch, &wanted)?]))
+        let kept = keep_wanted(&batch, &wanted)?;
+        // `take_rows` returns columns in schema order; callers read by
+        // position, so restore the requested order.
+        Ok(Some(vec![super::project_in_order(&kept, &refs)?]))
     }
 
     fn name(&self) -> &'static str {
